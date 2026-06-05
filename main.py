@@ -9,23 +9,29 @@ def home():
 
 @app.get("/health")
 def health():
-    return {
-        "service": "auralis-backend",
-        "status": "healthy"
-    }
+    return {"service": "auralis-media", "status": "healthy"}
 
-# This is the new "Magic" part that finds the high-quality music link
 @app.get("/resolve")
 def resolve_video(video_id: str):
     try:
+        # These PRO settings make the backend look like a real Android app
         ydl_opts = {
-            'format': 'bestaudio/best', # Tells it we only want the best audio
+            'format': 'bestaudio/best',
             'quiet': True,
             'no_warnings': True,
+            'source_address': '0.0.0.0',
+            'nocheckcertificate': True,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web'],
+                    'skip': ['dash', 'hls']
+                }
+            }
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # It goes to YouTube, finds the direct link, and gives it back to the app
             info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
             return {"url": info['url']}
     except Exception as e:
+        # This will tell us EXACTLY why it failed in the logs
+        print(f"Extraction Error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
