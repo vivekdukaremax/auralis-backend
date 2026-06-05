@@ -13,7 +13,7 @@ from collections import OrderedDict
 from typing import Optional
 
 # --- Configuration ---
-BACKEND_VERSION = "1.1.0-PRODUCTION"
+BACKEND_VERSION = "1.2.0-FLEX-RESOLVE"
 MAX_SEARCH_RESULTS = 15
 CACHE_TTL = 600
 CACHE_MAX_SIZE = 100
@@ -50,67 +50,72 @@ def log_event(endpoint: str, rid: str, start: float, success: bool, msg: str, er
     if err: log_line += f" err_type={err}"
     logger.info(log_line)
 
-# --- Logic: Extraction Core ---
-
-def fetch_search(q: str):
-    opts = {'extract_flat': True, 'quiet': True, 'no_warnings': True, 'nocheckcertificate': True}
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        res = ydl.extract_info(f"ytsearch{MAX_SEARCH_RESULTS}:{q}", download=False)
-        output = []
-        for e in res.get('entries', []):
-            if e.get('id') and e.get('title'):
-                output.append({
-                    "id": e['id'], 
-                    "title": e['title'],
-                    "artist": e.get('uploader', 'YouTube'),
-                    "duration": int(e.get('duration') or 0),
-                    "thumbnail": f"https://i.ytimg.com/vi/{e['id']}/hqdefault.jpg"
-                })
-        return output
+# --- Logic: Flexible Extraction Core ---
 
 def fetch_resolve(vid: str):
-    print(f"\n[DIAGNOSTIC] Resolving ID: {vid}")
-    
-    # CONCURRENCY FIX: Generate unique path per request
+    print(f"\n[DIAGNOSTIC] Flexible Resolve for ID: {vid}")
     temp_cookie_path = f"/tmp/cookies_{uuid.uuid4().hex}.txt"
     
+    # We remove the 'format' constraint here to allow metadata to load regardless
     opts = {
-        'format': 'bestaudio/best', 
         'quiet': True, 
         'no_warnings': False,
         'nocheckcertificate': True,
         'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
     }
     
-    # ISOLATION: Copy read-only secret to a unique writable location
     if os.path.exists(COOKIE_PATH):
         try:
             shutil.copyfile(COOKIE_PATH, temp_cookie_path)
             opts['cookiefile'] = temp_cookie_path
-            print(f"[DIAGNOSTIC] Success: Using isolated cookies at {temp_cookie_path}")
         except Exception as e:
             print(f"[DIAGNOSTIC] ERROR: Failed to isolate cookie file: {str(e)}")
-    else:
-        print("[DIAGNOSTIC] WARNING: No cookie file found at secret path.")
 
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
+            # Get info for ALL available formats
             info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False)
-            url = info.get('url')
-            if not url and 'formats' in info:
-                audio = [f for f in info['formats'] if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
-                if audio:
-                    audio.sort(key=lambda x: x.get('abr', 0) or 0, reverse=True)
-                    url = audio[0]['url']
-            return url
+            
+            formats = info.get('formats', [])
+            print(f"[DIAGNOSTIC] Extracted {len(formats)} formats for {vid}")
+            
+            # 1. Strategy: Filter for high-quality audio-only streams (M4A/Opus)
+            audio_only = [f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
+            
+            # Sort by Average Bitrate (abr) descending
+            audio_only.sort(key=lambda x: (x.get('abr') or 0, x.get('tbr') or 0), reverse=True)
+            
+            selected_format = None
+            
+            if audio_only:
+                selected_format = audio_only[0]
+                print(f"[DIAGNOSTIC] Found best audio-only format: {selected_format.get('format_id')}")
+            else:
+                # 2. Strategy: Fallback to best format containing audio (Combined Video+Audio)
+                print("[DIAGNOSTIC] No audio-only found. Falling back to combined streams.")
+                with_audio = [f for f in formats if f.get('acodec') != 'none']
+                if with_audio:
+                    with_audio.sort(key=lambda x: x.get('tbr') or 0, reverse=True)
+                    selected_format = with_audio[0]
+
+            if selected_format:
+                return {
+                    "url": selected_format['url'],
+                    "diagnostics": {
+                        "format_id": selected_format.get('format_id'),
+                        "extension": selected_format.get('ext'),
+                        "total_formats": len(formats),
+                        "audio_only_count": len(audio_only),
+                        "selected_type": "audio-only" if selected_format in audio_only else "combined"
+                    }
+                }
+            
+            raise Exception("ERR_NO_PLAYABLE_AUDIO_FORMATS")
+            
     finally:
-        # CLEANUP: Delete the unique temporary file
         if os.path.exists(temp_cookie_path):
-            try:
-                os.remove(temp_cookie_path)
-                print(f"[DIAGNOSTIC] Cleanup: Removed {temp_cookie_path}")
-            except:
-                pass
+            try: os.remove(temp_cookie_path)
+            except: pass
 
 # --- Endpoints ---
 
@@ -132,20 +137,22 @@ async def search(q: str = Query(..., min_length=2)):
     rid = str(uuid.uuid4())[:8]
     start = time.time()
     q = q.strip()
-
     cached = get_cached_search(q)
-    if cached:
-        log_event("SEARCH", rid, start, True, f"cache_hit q='{q}'")
-        return cached
-
+    if cached: return cached
     try:
-        output = await run_in_threadpool(fetch_search, q)
-        set_cached_search(q, output)
-        log_event("SEARCH", rid, start, True, f"q='{q}' count={len(output)}")
-        return output
+        opts = {'extract_flat': True, 'quiet': True, 'no_warnings': True}
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            res = ydl.extract_info(f"ytsearch{MAX_SEARCH_RESULTS}:{q}", download=False)
+            output = []
+            for e in res.get('entries', []):
+                if e.get('id'):
+                    output.append({"id": e['id'], "title": e['title'], "artist": e.get('uploader', 'YouTube'), "duration": int(e.get('duration') or 0), "thumbnail": f"https://i.ytimg.com/vi/{e['id']}/hqdefault.jpg"})
+            set_cached_search(q, output)
+            log_event("SEARCH", rid, start, True, f"q={q}")
+            return output
     except Exception as e:
-        log_event("SEARCH", rid, start, False, str(e), "EXTRACTION_FAILED")
-        return JSONResponse(status_code=500, content={"error": "SEARCH_FAILED", "message": "Search error"})
+        log_event("SEARCH", rid, start, False, str(e))
+        return []
 
 @app.get("/resolve")
 async def resolve(video_id: str):
@@ -156,13 +163,13 @@ async def resolve(video_id: str):
         return JSONResponse(status_code=400, content={"error": "INVALID_ID", "message": "Malformed ID"})
 
     try:
-        url = await run_in_threadpool(fetch_resolve, video_id)
-        if url:
+        res = await run_in_threadpool(fetch_resolve, video_id)
+        if res:
             log_event("RESOLVE", rid, start, True, f"id={video_id}")
-            return {"url": url}
-        raise Exception("NO_URL_FOUND")
+            return res
+        raise Exception("EXTRACTION_RETURNED_NULL")
     except Exception as e:
-        log_event("RESOLVE", rid, start, False, str(e), "RESOLVE_FAILED")
+        log_event("RESOLVE", rid, start, False, str(e), type(e).__name__)
         return JSONResponse(status_code=500, content={
             "exception_type": type(e).__name__,
             "message": str(e),
