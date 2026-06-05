@@ -1,7 +1,10 @@
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
 import os
 
-app = FastAPI()
+app = FastAPI(
+    title="Auralis Backend",
+    version="1.0.0"
+)
 
 API_KEY = os.getenv("API_KEY")
 
@@ -34,24 +37,38 @@ def debug():
     }
 
 
+@app.get("/headers")
+async def headers(request: Request):
+    return {
+        "headers": dict(request.headers)
+    }
+
+
 @app.get("/secure-test")
-def secure_test(authorization: str = Header(None)):
+async def secure_test(request: Request):
+
+    received_header = request.headers.get("authorization")
 
     expected_header = f"Bearer {API_KEY}"
 
-    print("Received Header:", repr(authorization))
-    print("Expected Header:", repr(expected_header))
+    print("\n")
+    print("=" * 50)
+    print("RECEIVED:", repr(received_header))
+    print("EXPECTED:", repr(expected_header))
+    print("=" * 50)
+    print("\n")
 
-    if authorization != expected_header:
+    if received_header != expected_header:
         raise HTTPException(
             status_code=401,
             detail={
-                "error": "Invalid API Key",
-                "received": authorization,
+                "message": "Invalid API Key",
+                "received": received_header,
                 "expected": expected_header
             }
         )
 
     return {
-        "message": "Authentication successful"
+        "message": "Authentication successful",
+        "received": received_header
     }
