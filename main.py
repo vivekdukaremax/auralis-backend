@@ -6,16 +6,18 @@ import time
 import uuid
 import logging
 import re
+import os
 import traceback
 from collections import OrderedDict
 from typing import Optional
 
 # --- Configuration ---
-BACKEND_VERSION = "1.0.0-STEALTH"
+BACKEND_VERSION = "1.0.1"
 MAX_SEARCH_RESULTS = 15
 CACHE_TTL = 600
 CACHE_MAX_SIZE = 100
 YOUTUBE_ID_REGEX = re.compile(r"^[a-zA-Z0-9_-]{11}$")
+COOKIE_PATH = "/etc/secrets/cookies.txt"
 
 app = FastAPI()
 
@@ -47,8 +49,9 @@ def log_event(endpoint: str, rid: str, start: float, success: bool, msg: str, er
     if err: log_line += f" err_type={err}"
     logger.info(log_line)
 
-# --- Logic: Stealth Extraction Core ---
+# --- Logic: Extraction Core ---
 def fetch_search(q: str):
+    # SEARCH REMAINS UNAUTHENTICATED
     opts = {'extract_flat': True, 'quiet': True, 'no_warnings': True, 'nocheckcertificate': True}
     with yt_dlp.YoutubeDL(opts) as ydl:
         res = ydl.extract_info(f"ytsearch{MAX_SEARCH_RESULTS}:{q}", download=False)
@@ -64,26 +67,20 @@ def fetch_search(q: str):
         return output
 
 def fetch_resolve(vid: str):
-    print(f"\n[DIAGNOSTIC] Stage 1: Initializing Stealth Mobile client for ID: {vid}")
     opts = {
-        'format': 'bestaudio/best',
-        'quiet': True,
+        'format': 'bestaudio/best', 
+        'quiet': True, 
         'no_warnings': True,
         'nocheckcertificate': True,
-        'extractor_args': {
-            'youtube': {
-                # Pivot to internal Mobile App APIs to bypass "Sign in" web blocks
-                'player_client': ['android', 'ios'],
-                'player_skip': ['webpage', 'configs'],
-                'skip': ['hls', 'dash']
-            }
-        }
+        'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
     }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        print(f"[DIAGNOSTIC] Stage 2: Extracting metadata using Mobile clients for ID: {vid}")
-        info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False)
+    
+    # APPLY COOKIES ONLY IF PRESENT
+    if os.path.exists(COOKIE_PATH):
+        opts['cookiefile'] = COOKIE_PATH
         
-        print(f"[DIAGNOSTIC] Stage 3: Parsing formats for ID: {vid}")
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False)
         url = info.get('url')
         if not url and 'formats' in info:
             audio = [f for f in info['formats'] if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
@@ -91,15 +88,6 @@ def fetch_resolve(vid: str):
                 audio.sort(key=lambda x: x.get('abr', 0) or 0, reverse=True)
                 url = audio[0]['url']
         return url
-
-# --- Error Mapper ---
-def create_error_response(e: Exception):
-    err_str = str(e).lower()
-    if "403" in err_str or "sign in" in err_str: 
-        return 403, "FORBIDDEN", "YouTube blocked request (Sign-in required)", False
-    if "429" in err_str: return 429, "RATE_LIMIT", "Too many requests", True
-    if "not available" in err_str: return 404, "NOT_FOUND", "Video is unavailable", False
-    return 500, "INTERNAL_ERROR", str(e), True
 
 # --- Endpoints ---
 
@@ -109,7 +97,12 @@ async def health():
 
 @app.get("/version")
 async def version():
-    return {"backend_version": BACKEND_VERSION, "search_enabled": True, "resolve_enabled": True}
+    return {
+        "backend_version": BACKEND_VERSION,
+        "search_enabled": True,
+        "resolve_enabled": True,
+        "cookies_present": os.path.exists(COOKIE_PATH)
+    }
 
 @app.get("/search")
 async def search(q: str = Query(..., min_length=2)):
@@ -129,7 +122,7 @@ async def search(q: str = Query(..., min_length=2)):
         return output
     except Exception as e:
         log_event("SEARCH", rid, start, False, str(e), "EXTRACTION_FAILED")
-        return JSONResponse(status_code=500, content={"error": "SEARCH_FAILED", "message": "Search error"})
+        return JSONResponse(status_code=500, content={"error": "SEARCH_FAILED", "message": "Search unavailable"})
 
 @app.get("/resolve")
 async def resolve(video_id: str):
@@ -144,15 +137,11 @@ async def resolve(video_id: str):
         if url:
             log_event("RESOLVE", rid, start, True, f"id={video_id}")
             return {"url": url}
-        raise Exception("NO_URL_FOUND")
+        raise Exception("URL_NOT_FOUND")
     except Exception as e:
-        print(f"\n!!! RESOLVE FAILED !!!")
-        print(f"video_id={video_id}")
-        print(f"Exception Type: {type(e).__name__}")
-        print(f"Exception Message: {str(e)}")
-        traceback.print_exc()
-        print("!!! END DIAGNOSTIC !!!\n")
+        log_event("RESOLVE", rid, start, False, str(e), "RESOLVE_FAILED")
+        # Check if it was a bot challenge even with cookies
+        if "confirm you're not a bot" in str(e).lower():
+            return JSONResponse(status_code=403, content={"error": "COOKIE_EXPIRED", "message": "Backend authentication expired.", "retry_allowed": False})
         
-        status, code, msg, retry = create_error_response(e)
-        log_event("RESOLVE", rid, start, False, msg, code)
-        return JSONResponse(status_code=status, content={"error": code, "message": msg, "retry_allowed": retry})
+        return JSONResponse(status_code=404, content={"error": "NOT_FOUND", "message": "Content restricted or unavailable."})
