@@ -1,6 +1,3 @@
-Here is the complete, concurrency-safe, and diagnostic-enabled main.py.
-I have integrated the unique temporary file logic, the cleanup routine, and preserved your working search and cache architecture.
-Python
 from fastapi import FastAPI, Request, Query, HTTPException
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
@@ -171,17 +168,3 @@ async def resolve(video_id: str):
             "message": str(e),
             "cookies_applied": os.path.exists(COOKIE_PATH)
         })
-Instructions for Verification
-1.
-Push this main.py to GitHub.
-2.
-Wait for Render to finish the "Deploy."
-3.
-Run the Test: Go to https://auralis-media.onrender.com/resolve?video_id=GX9x62kFsVU.
-4.
-Confirm Results:
-◦
-Success: You will receive a direct streaming URL.
-◦
-Fail: You will receive a JSON explaining exactly why (e.g., DownloadError with a message).
-This build is now production-safe and will handle multiple users simultaneously without error. Standing by for your results!
