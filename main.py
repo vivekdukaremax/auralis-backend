@@ -11,7 +11,7 @@ from collections import OrderedDict
 from typing import Optional
 
 # --- Configuration ---
-BACKEND_VERSION = "1.0.1-DIAG"
+BACKEND_VERSION = "1.0.1-DIAG-FIXED"
 MAX_SEARCH_RESULTS = 15
 CACHE_TTL = 600
 CACHE_MAX_SIZE = 100
@@ -20,7 +20,7 @@ COOKIE_PATH = "/etc/secrets/cookies.txt"
 
 app = FastAPI()
 
-# --- True LRU Cache (UNCHANGED) ---
+# --- True LRU Cache ---
 search_cache = OrderedDict()
 
 def get_cached_search(q: str):
@@ -37,17 +37,14 @@ def set_cached_search(q: str, data: list):
         search_cache.popitem(last=False)
     search_cache[q] = {"timestamp": time.time(), "data": data}
 
-# --- Logic: Extraction Core (Minimal Resolve Patch) ---
+# --- Logic: Extraction Core (Diagnostic Resolve) ---
 
 def fetch_resolve(vid: str):
-    # DIAGNOSTIC LOGS
     print(f"\n[DIAGNOSTIC] Resolving ID: {vid}")
-    print(f"[DIAGNOSTIC] yt-dlp version: {yt_dlp.version.__version__}")
     
     file_exists = os.path.exists(COOKIE_PATH)
     file_readable = os.access(COOKIE_PATH, os.R_OK) if file_exists else False
-    print(f"[DIAGNOSTIC] Cookie File: exists={file_exists}, readable={file_readable}")
-
+    
     opts = {
         'format': 'bestaudio/best',
         'quiet': True,
@@ -58,9 +55,9 @@ def fetch_resolve(vid: str):
     
     if file_exists and file_readable:
         opts['cookiefile'] = COOKIE_PATH
-        print("[DIAGNOSTIC] yt-dlp: 'cookiefile' option successfully added to opts.")
+        print("[DIAGNOSTIC] yt-dlp: cookiefile option ADDED.")
     else:
-        print("[DIAGNOSTIC] WARNING: yt-dlp: Running WITHOUT cookies (file missing or unreadable).")
+        print("[DIAGNOSTIC] yt-dlp: cookiefile option SKIPPED (file missing or unreadable).")
 
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False)
@@ -80,16 +77,16 @@ async def health():
 
 @app.get("/version")
 async def version():
+    c_exists = os.path.exists(COOKIE_PATH)
+    c_readable = os.access(COOKIE_PATH, os.R_OK) if c_exists else False
     return {
         "backend_version": BACKEND_VERSION,
-        "cookies_present": os.path.exists(COOKIE_PATH),
-        "cookies_readable": os.access(COOKIE_PATH, os.R_OK) if os.path.exists(COOKIE_PATH) else False
-        "cookie_path": COOKIE_PATH
+        "cookies_present": c_exists,
+        "cookies_readable": c_readable
     }
 
 @app.get("/search")
 async def search(q: str = Query(..., min_length=2)):
-    # SEARCH LOGIC UNCHANGED
     cached = get_cached_search(q)
     if cached: return cached
     try:
@@ -99,7 +96,13 @@ async def search(q: str = Query(..., min_length=2)):
             output = []
             for e in res.get('entries', []):
                 if e.get('id'):
-                    output.append({"id": e['id'], "title": e['title'], "artist": e.get('uploader', 'YouTube'), "duration": int(e.get('duration') or 0), "thumbnail": f"https://i.ytimg.com/vi/{e['id']}/hqdefault.jpg"})
+                    output.append({
+                        "id": e['id'], 
+                        "title": e['title'], 
+                        "artist": e.get('uploader', 'YouTube'), 
+                        "duration": int(e.get('duration') or 0), 
+                        "thumbnail": f"https://i.ytimg.com/vi/{e['id']}/hqdefault.jpg"
+                    })
             set_cached_search(q, output)
             return output
     except Exception: return []
@@ -115,9 +118,8 @@ async def resolve(video_id: str):
             return {"url": url}
         raise Exception("NO_URL_RETURNED")
     except Exception as e:
-        # RETURN REAL EXCEPTION FOR ANALYSIS
         return JSONResponse(status_code=500, content={
             "exception_type": type(e).__name__,
             "message": str(e),
-            "cookies_applied": os.path.exists(COOKIE_PATH)
+            "cookies_present": os.path.exists(COOKIE_PATH)
         })
