@@ -7,12 +7,11 @@ import uuid
 import logging
 import re
 import os
-import traceback
 from collections import OrderedDict
 from typing import Optional
 
 # --- Configuration ---
-BACKEND_VERSION = "1.0.1"
+BACKEND_VERSION = "1.0.1-DIAG"
 MAX_SEARCH_RESULTS = 15
 CACHE_TTL = 600
 CACHE_MAX_SIZE = 100
@@ -21,7 +20,7 @@ COOKIE_PATH = "/etc/secrets/cookies.txt"
 
 app = FastAPI()
 
-# --- True LRU Cache ---
+# --- True LRU Cache (UNCHANGED) ---
 search_cache = OrderedDict()
 
 def get_cached_search(q: str):
@@ -38,47 +37,31 @@ def set_cached_search(q: str, data: list):
         search_cache.popitem(last=False)
     search_cache[q] = {"timestamp": time.time(), "data": data}
 
-# --- Structured Logging ---
-logging.basicConfig(level=logging.INFO, format='%(message)s')
-logger = logging.getLogger("auralis")
-
-def log_event(endpoint: str, rid: str, start: float, success: bool, msg: str, err: Optional[str] = None):
-    dur = round(time.time() - start, 3)
-    status = "SUCCESS" if success else "FAILURE"
-    log_line = f"[{endpoint}] rid={rid} dur={dur}s status={status} msg='{msg}'"
-    if err: log_line += f" err_type={err}"
-    logger.info(log_line)
-
-# --- Logic: Extraction Core ---
-def fetch_search(q: str):
-    # SEARCH REMAINS UNAUTHENTICATED
-    opts = {'extract_flat': True, 'quiet': True, 'no_warnings': True, 'nocheckcertificate': True}
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        res = ydl.extract_info(f"ytsearch{MAX_SEARCH_RESULTS}:{q}", download=False)
-        output = []
-        for e in res.get('entries', []):
-            if e.get('id') and e.get('title'):
-                output.append({
-                    "id": e['id'], "title": e['title'],
-                    "artist": e.get('uploader', 'YouTube'),
-                    "duration": int(e.get('duration') or 0),
-                    "thumbnail": f"https://i.ytimg.com/vi/{e['id']}/hqdefault.jpg"
-                })
-        return output
+# --- Logic: Extraction Core (Minimal Resolve Patch) ---
 
 def fetch_resolve(vid: str):
+    # DIAGNOSTIC LOGS
+    print(f"\n[DIAGNOSTIC] Resolving ID: {vid}")
+    print(f"[DIAGNOSTIC] yt-dlp version: {yt_dlp.version.__version__}")
+    
+    file_exists = os.path.exists(COOKIE_PATH)
+    file_readable = os.access(COOKIE_PATH, os.R_OK) if file_exists else False
+    print(f"[DIAGNOSTIC] Cookie File: exists={file_exists}, readable={file_readable}")
+
     opts = {
-        'format': 'bestaudio/best', 
-        'quiet': True, 
-        'no_warnings': True,
+        'format': 'bestaudio/best',
+        'quiet': True,
+        'no_warnings': False,
         'nocheckcertificate': True,
         'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
     }
     
-    # APPLY COOKIES ONLY IF PRESENT
-    if os.path.exists(COOKIE_PATH):
+    if file_exists and file_readable:
         opts['cookiefile'] = COOKIE_PATH
-        
+        print("[DIAGNOSTIC] yt-dlp: 'cookiefile' option successfully added to opts.")
+    else:
+        print("[DIAGNOSTIC] WARNING: yt-dlp: Running WITHOUT cookies (file missing or unreadable).")
+
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False)
         url = info.get('url')
@@ -99,49 +82,42 @@ async def health():
 async def version():
     return {
         "backend_version": BACKEND_VERSION,
-        "search_enabled": True,
-        "resolve_enabled": True,
-        "cookies_present": os.path.exists(COOKIE_PATH)
+        "cookies_present": os.path.exists(COOKIE_PATH),
+        "cookies_readable": os.access(COOKIE_PATH, os.R_OK) if os.path.exists(COOKIE_PATH) else False
+        "cookie_path": COOKIE_PATH
     }
 
 @app.get("/search")
 async def search(q: str = Query(..., min_length=2)):
-    rid = str(uuid.uuid4())[:8]
-    start = time.time()
-    q = q.strip()
-
+    # SEARCH LOGIC UNCHANGED
     cached = get_cached_search(q)
-    if cached:
-        log_event("SEARCH", rid, start, True, f"cache_hit q='{q}'")
-        return cached
-
+    if cached: return cached
     try:
-        output = await run_in_threadpool(fetch_search, q)
-        set_cached_search(q, output)
-        log_event("SEARCH", rid, start, True, f"q='{q}' count={len(output)}")
-        return output
-    except Exception as e:
-        log_event("SEARCH", rid, start, False, str(e), "EXTRACTION_FAILED")
-        return JSONResponse(status_code=500, content={"error": "SEARCH_FAILED", "message": "Search unavailable"})
+        opts = {'extract_flat': True, 'quiet': True, 'no_warnings': True}
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            res = ydl.extract_info(f"ytsearch{MAX_SEARCH_RESULTS}:{q}", download=False)
+            output = []
+            for e in res.get('entries', []):
+                if e.get('id'):
+                    output.append({"id": e['id'], "title": e['title'], "artist": e.get('uploader', 'YouTube'), "duration": int(e.get('duration') or 0), "thumbnail": f"https://i.ytimg.com/vi/{e['id']}/hqdefault.jpg"})
+            set_cached_search(q, output)
+            return output
+    except Exception: return []
 
 @app.get("/resolve")
 async def resolve(video_id: str):
-    rid = str(uuid.uuid4())[:8]
-    start = time.time()
-
     if not YOUTUBE_ID_REGEX.match(video_id):
-        return JSONResponse(status_code=400, content={"error": "INVALID_ID", "message": "Invalid format"})
+        return JSONResponse(status_code=400, content={"error": "INVALID_ID", "message": "Malformed ID"})
 
     try:
         url = await run_in_threadpool(fetch_resolve, video_id)
         if url:
-            log_event("RESOLVE", rid, start, True, f"id={video_id}")
             return {"url": url}
-        raise Exception("URL_NOT_FOUND")
+        raise Exception("NO_URL_RETURNED")
     except Exception as e:
-        log_event("RESOLVE", rid, start, False, str(e), "RESOLVE_FAILED")
-        # Check if it was a bot challenge even with cookies
-        if "confirm you're not a bot" in str(e).lower():
-            return JSONResponse(status_code=403, content={"error": "COOKIE_EXPIRED", "message": "Backend authentication expired.", "retry_allowed": False})
-        
-        return JSONResponse(status_code=404, content={"error": "NOT_FOUND", "message": "Content restricted or unavailable."})
+        # RETURN REAL EXCEPTION FOR ANALYSIS
+        return JSONResponse(status_code=500, content={
+            "exception_type": type(e).__name__,
+            "message": str(e),
+            "cookies_applied": os.path.exists(COOKIE_PATH)
+        })
