@@ -1,20 +1,30 @@
-# 1. Start with Python
+# 1. Use Python 3.11 Slim for a lightweight base
 FROM python:3.11-slim
 
-# 2. Install ffmpeg (This is the secret tool needed for music)
+# 2. Install system dependencies
+# ffmpeg: Required for audio post-processing and ITAG extraction
+# curl: Required to fetch the Node.js installation script
+# nodejs: The JavaScript runtime required by yt-dlp to solve YouTube challenges
 RUN apt-get update && apt-get install -y \
     ffmpeg \
+    curl \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. Set the working folder
+# 3. Set the working directory
 WORKDIR /app
 
-# 4. Copy your list of requirements and install them
+# 4. Create a writable cache directory for yt-dlp
+# This is required for the EJS challenge solver to download and persist components
+RUN mkdir -p /tmp/ytdlp-cache && chmod 777 /tmp/ytdlp-cache
+
+# 5. Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 5. Copy all your code into the container
+# 6. Copy application code
 COPY . .
 
-# 6. Start the server
+# 7. Start the server via Uvicorn
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
