@@ -89,15 +89,21 @@ def fetch_resolve(vid: str):
     # remote_components: List required to download ejs:github solver
     # js_runtimes: List specifying Node as the interpreter
     opts = {
-        'format': 'bestaudio/best', 
-        'quiet': True, 
-        'no_warnings': True,
-        'nocheckcertificate': True,
-        'cachedir': YTDLP_CACHE_DIR,
-        'remote_components': ['ejs:github'],
-        'js_runtimes': ['node'],
-        'extractor_args': {'youtube': {'player_client': ['ios', 'android', 'web']}}
+    'format': 'bestaudio/best',
+    'quiet': True,
+    'no_warnings': True,
+    'nocheckcertificate': True,
+    'cachedir': YTDLP_CACHE_DIR,
+    'remote_components': ['ejs:github'],
+    'js_runtimes': {
+        'node': {}
+    },
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['ios', 'android', 'web']
+        }
     }
+}
     
     # Isolation: Copy read-only secret to a unique writable temporary file
     if os.path.exists(COOKIE_SECRET_PATH):
