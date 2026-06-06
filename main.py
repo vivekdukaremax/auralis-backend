@@ -14,8 +14,7 @@ from collections import OrderedDict
 from typing import Optional
 
 # --- Configuration ---
-# Standardized variable names from your 1.2.0-FLEX-RESOLVE build
-BACKEND_VERSION = "1.2.1-DIAGNOSTIC-VERIFIED"
+BACKEND_VERSION = "1.2.2-DIAGNOSTIC-CLIENT-EXP"
 MAX_SEARCH_RESULTS = 15
 CACHE_TTL = 600
 CACHE_MAX_SIZE = 100
@@ -24,7 +23,7 @@ COOKIE_PATH = "/etc/secrets/cookies.txt"
 
 app = FastAPI()
 
-# --- LRU Cache (UNCHANGED) ---
+# --- LRU Cache Implementation ---
 search_cache = OrderedDict()
 
 def get_cached_search(q: str):
@@ -49,7 +48,8 @@ def log_event(endpoint: str, rid: str, start: float, success: bool, msg: str, er
     dur = round(time.time() - start, 3)
     status = "SUCCESS" if success else "FAILURE"
     log_line = f"[{endpoint}] rid={rid} dur={dur}s status={status} msg='{msg}'"
-    if err_type: log_line += f" err_type={err_type}"
+    if err_type:
+        log_line += f" err_type={err_type}"
     logger.info(log_line)
 
 # --- Core Logic: Diagnostic Resolve ---
@@ -58,11 +58,16 @@ def fetch_resolve_diagnostic(vid: str):
     rid = str(uuid.uuid4().hex)[:8]
     temp_cookie_path = f"/tmp/cookies_{rid}.txt"
     
+    # EXPERIMENT: Pivot client list to ios and mweb to find hidden streamingData
     opts = {
         'quiet': True, 
         'no_warnings': False, 
         'nocheckcertificate': True,
-        'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['ios', 'mweb', 'android']
+            }
+        }
     }
     
     cookies_applied = False
@@ -77,7 +82,7 @@ def fetch_resolve_diagnostic(vid: str):
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             try:
-                # Use process=False to bypass the library-side format validation crash
+                # User Requirement: Keep process=False exactly as is
                 info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False, process=False)
                 
                 formats = info.get('formats', [])
@@ -104,7 +109,6 @@ def fetch_resolve_diagnostic(vid: str):
                     "formats_sample": formats_sample
                 }
             except Exception as e:
-                # Capture exceptions that occur even with process=False
                 return {
                     "diagnostic_error_type": type(e).__name__,
                     "diagnostic_error_message": str(e),
@@ -119,7 +123,7 @@ def fetch_resolve_diagnostic(vid: str):
             except:
                 pass
 
-# --- Endpoints ---
+# --- API Endpoints ---
 
 @app.get("/health")
 async def health():
@@ -140,23 +144,28 @@ async def search(q: str = Query(..., min_length=2)):
     start = time.time()
     q = q.strip()
     cached = get_cached_search(q)
-    if cached: return cached
+    if cached:
+        return cached
+
     try:
         opts = {'extract_flat': True, 'quiet': True, 'no_warnings': True}
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            res = ydl.extract_info(f"ytsearch{MAX_SEARCH_RESULTS}:{q}", download=False)
-            output = []
-            for e in res.get('entries', []):
-                if e.get('id'):
-                    output.append({
-                        "id": e['id'], "title": e['title'],
-                        "artist": e.get('uploader', 'YouTube'),
-                        "duration": int(e.get('duration') or 0),
+        def execute_search():
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                res = ydl.extract_info(f"ytsearch{MAX_SEARCH_RESULTS}:{q}", download=False)
+                return [
+                    {
+                        "id": e['id'], 
+                        "title": e['title'], 
+                        "artist": e.get('uploader', 'YouTube'), 
+                        "duration": int(e.get('duration') or 0), 
                         "thumbnail": f"https://i.ytimg.com/vi/{e['id']}/hqdefault.jpg"
-                    })
-            set_cached_search(q, output)
-            log_event("SEARCH", rid, start, True, f"q='{q}'")
-            return output
+                    } for e in res.get('entries', []) if e.get('id')
+                ]
+        
+        output = await run_in_threadpool(execute_search)
+        set_cached_search(q, output)
+        log_event("SEARCH", rid, start, True, f"q='{q}'")
+        return output
     except Exception as e:
         log_event("SEARCH", rid, start, False, str(e), type(e).__name__)
         return []
@@ -170,7 +179,6 @@ async def resolve(video_id: str):
         return JSONResponse(status_code=400, content={"error": "INVALID_ID", "message": "Malformed ID"})
 
     try:
-        # Executes the diagnostic fetch
         res = await run_in_threadpool(fetch_resolve_diagnostic, video_id)
         log_event("RESOLVE_DIAG", rid, start, True, f"id={video_id}")
         return res
@@ -180,3 +188,7 @@ async def resolve(video_id: str):
             "error": type(e).__name__,
             "message": str(e)
         })
+
+@app.get("/debug-resolve")
+async def debug_resolve(video_id: str):
+    return await resolve(video_id)
